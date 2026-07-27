@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: niko-ai
+    runtime: node
+    plan: starter
+    autoDeploy: true
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start:prod
+    healthCheckPath: /platform/config
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NIKO_DATA_ROOT
+        value: /var/data/niko-ai
+    disk:
+      name: niko-ai-data
+      mountPath: /var/data
+      sizeGB: 10
