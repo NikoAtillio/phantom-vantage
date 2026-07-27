@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //|  PhantomVisual.mq5                                               |
-//|  PHANTOM p2 — Chart Visual Overlay Indicator                     |
+//|  PHANTOM VANTAGE — Chart Visual Overlay Indicator                     |
 //|  Reads signals_vantage_live.jsonl and renders:                   |
 //|    • EMA 20 / 50 / 200 on current chart timeframe               |
 //|    • Entry arrows per trade                                       |
