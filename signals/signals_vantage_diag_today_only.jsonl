@@ -1,0 +1,1 @@
+{"v": 1, "action": "meta", "engine": "phantom_us100_v5_fund", "instrument": "US100", "signal_account_size": 10000.0, "cash": true, "cash_daily_dd_pct": 4.5, "atr_trail_mult": 0.8}

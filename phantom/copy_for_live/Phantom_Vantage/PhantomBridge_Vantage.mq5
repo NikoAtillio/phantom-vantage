@@ -1955,6 +1955,16 @@ void ProcessLine(const string raw)
 void PumpFileLive(const string source)
 {
    long start_pos = (long)g_filepos;
+   int act_meta = 0;
+   int act_open = 0;
+   int act_modify = 0;
+   int act_close = 0;
+   int act_heartbeat = 0;
+   int act_pause = 0;
+   int act_resume = 0;
+   int act_hard_stop = 0;
+   int act_flatten = 0;
+   int act_other = 0;
    ResetLastError();
    int h=FileOpen(InpSignalFile, FILE_READ|FILE_TXT|FILE_ANSI|FILE_COMMON);
    if(h==INVALID_HANDLE){
@@ -1984,6 +1994,17 @@ void PumpFileLive(const string source)
       string line=FileReadString(h);
       if(StringLen(line)>0){
          lines_read++;
+         string action = JGetStr(line, "action");
+         if(action == "meta") act_meta++;
+         else if(action == "open") act_open++;
+         else if(action == "modify") act_modify++;
+         else if(action == "close") act_close++;
+         else if(action == "heartbeat") act_heartbeat++;
+         else if(action == "pause_entries") act_pause++;
+         else if(action == "resume_entries") act_resume++;
+         else if(action == "hard_stop") act_hard_stop++;
+         else if(action == "flatten_all") act_flatten++;
+         else act_other++;
          ProcessLine(line);
          lines_processed++;
       }
@@ -2009,6 +2030,23 @@ void PumpFileLive(const string source)
           ";processed="+IntegerToString(lines_processed));
    PrintFormat("PhantomBridge live poll | source=%s file=%s start=%d end=%d lines=%d processed=%d",
                source, InpSignalFile, start_pos, end_pos, lines_read, lines_processed);
+
+   if(lines_read > 0){
+      string action_mix =
+         "meta="+IntegerToString(act_meta)+
+         ",open="+IntegerToString(act_open)+
+         ",modify="+IntegerToString(act_modify)+
+         ",close="+IntegerToString(act_close)+
+         ",heartbeat="+IntegerToString(act_heartbeat)+
+         ",pause="+IntegerToString(act_pause)+
+         ",resume="+IntegerToString(act_resume)+
+         ",hard_stop="+IntegerToString(act_hard_stop)+
+         ",flatten="+IntegerToString(act_flatten)+
+         ",other="+IntegerToString(act_other);
+
+      PrintFormat("PhantomBridge signal update | source=%s cursor=%d->%d +%d line(s) [%s]",
+                  source, start_pos, end_pos, lines_read, action_mix);
+   }
 
    if(lines_read == 0 && InpStaleCursorMinutes > 0 && IsLikelyMarketActive() && AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) && PositionsTotal() > 0){
       if(g_last_signal_progress > 0 && (TimeCurrent() - g_last_signal_progress) >= (InpStaleCursorMinutes * 60) && !g_stale_cursor_alerted){

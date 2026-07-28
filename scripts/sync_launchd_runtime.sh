@@ -37,6 +37,16 @@ for f in "${FILES[@]}"; do
   echo "Synced: ${src} -> ${dst}"
 done
 
+MIRROR_SCRIPT="${REPO_ROOT}/scripts/mirror_live_signals.sh"
+if [[ -x "${MIRROR_SCRIPT}" ]]; then
+  "${MIRROR_SCRIPT}" || true
+else
+  chmod +x "${MIRROR_SCRIPT}" 2>/dev/null || true
+  if [[ -x "${MIRROR_SCRIPT}" ]]; then
+    "${MIRROR_SCRIPT}" || true
+  fi
+fi
+
 if [[ "${RESTART}" -eq 1 ]]; then
   launchctl kickstart -k "gui/$(id -u)/${LAUNCH_AGENT_LABEL}"
   echo "Restarted launchd service: ${LAUNCH_AGENT_LABEL}"
