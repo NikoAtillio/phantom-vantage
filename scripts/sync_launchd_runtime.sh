@@ -47,6 +47,16 @@ else
   fi
 fi
 
+MIRROR_AGENT_INSTALLER="${REPO_ROOT}/scripts/install_signal_mirror_launchagent.sh"
+if [[ -x "${MIRROR_AGENT_INSTALLER}" ]]; then
+  "${MIRROR_AGENT_INSTALLER}" || true
+else
+  chmod +x "${MIRROR_AGENT_INSTALLER}" 2>/dev/null || true
+  if [[ -x "${MIRROR_AGENT_INSTALLER}" ]]; then
+    "${MIRROR_AGENT_INSTALLER}" || true
+  fi
+fi
+
 if [[ "${RESTART}" -eq 1 ]]; then
   launchctl kickstart -k "gui/$(id -u)/${LAUNCH_AGENT_LABEL}"
   echo "Restarted launchd service: ${LAUNCH_AGENT_LABEL}"
