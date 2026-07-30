@@ -1350,16 +1350,29 @@ bool GuardrailBlock()
    }
 
    // ---- max loss floor: TRAILING 15% off peak equity ---- [CASH-3]
+   double peak_before = g_peak_equity;
    double max_floor = g_peak_equity * (1.0 - InpCashTrailMaxLossPct/100.0);
 
    if(eq <= max_floor){
       FlattenAll("MAX_LOSS_TRAILING");
-      g_disabled_perm=true;
       g_halt_serverday=ServerDay();
-      Notify("PHANTOM CASH DISABLED","Trailing max-loss floor breached (eq="+DoubleToString(eq,2)+
-             " <= floor="+DoubleToString(max_floor,2)+
-             ", peak="+DoubleToString(g_peak_equity,2)+
-             "). Flattened & HARD-PAUSED until manual resume.");
+      if(InpReplayMode){
+         // In replay we treat trailing-floor breaches as day halts so the backtest
+         // can continue next server day without requiring a manual resume toggle.
+         g_halted_today=true;
+         g_peak_equity=eq;
+         Notify("PHANTOM CASH paused","Trailing max-loss floor breached (eq="+DoubleToString(eq,2)+
+                " <= floor="+DoubleToString(max_floor,2)+
+              ", peak="+DoubleToString(peak_before,2)+
+                "). Flattened & day-paused in replay; auto-resume next day.");
+      }
+      else{
+         g_disabled_perm=true;
+         Notify("PHANTOM CASH DISABLED","Trailing max-loss floor breached (eq="+DoubleToString(eq,2)+
+                " <= floor="+DoubleToString(max_floor,2)+
+              ", peak="+DoubleToString(peak_before,2)+
+                "). Flattened & HARD-PAUSED until manual resume.");
+      }
       SaveState();
       return true;
    }

@@ -1,0 +1,31 @@
+debug_rows_today=461
+zone_skip_reasons={'tolerance': 370, 'session': 60, 'score_h4': 28, 'score_ltf': 3}
+zone_dirs={'long': 444, 'short': 17}
+window_08_16_reasons={'tolerance': 213, 'score_h4': 25, 'session': 8}
+closest_tolerance_misses_08_16:
+  2026-07-30 12:30:00 dir=long dist=0.002135 tol=0.002000 delta=0.000135
+  2026-07-30 12:10:00 dir=long dist=0.002193 tol=0.002000 delta=0.000193
+  2026-07-30 14:00:00 dir=long dist=0.002282 tol=0.002000 delta=0.000282
+  2026-07-30 14:35:00 dir=long dist=0.002408 tol=0.002000 delta=0.000408
+  2026-07-30 14:40:00 dir=long dist=0.002442 tol=0.002000 delta=0.000442
+  2026-07-30 14:20:00 dir=long dist=0.002462 tol=0.002000 delta=0.000462
+  2026-07-30 12:20:00 dir=long dist=0.002528 tol=0.002000 delta=0.000528
+  2026-07-30 14:10:00 dir=long dist=0.002557 tol=0.002000 delta=0.000557
+  2026-07-30 08:40:00 dir=long dist=0.002729 tol=0.002000 delta=0.000729
+  2026-07-30 16:00:00 dir=long dist=0.002855 tol=0.002000 delta=0.000855
+score_h4_blocks_08_16:
+  2026-07-30 13:05:00 dir=long h4=0.0 h1=1.5 ltf=2.5
+  2026-07-30 13:10:00 dir=long h4=0.0 h1=1.5 ltf=2.0
+  2026-07-30 13:15:00 dir=long h4=0.0 h1=1.5 ltf=2.75
+  2026-07-30 13:15:00 dir=long h4=0.0 h1=1.5 ltf=2.75
+  2026-07-30 13:20:00 dir=long h4=0.0 h1=1.5 ltf=2.75
+  2026-07-30 13:20:00 dir=long h4=0.0 h1=1.5 ltf=2.75
+  2026-07-30 13:25:00 dir=long h4=0.0 h1=1.5 ltf=3.0
+  2026-07-30 13:25:00 dir=long h4=0.0 h1=1.5 ltf=3.0
+  2026-07-30 13:30:00 dir=long h4=0.0 h1=1.5 ltf=3.0
+  2026-07-30 13:30:00 dir=long h4=0.0 h1=1.5 ltf=3.0
+---
+signal_actions_today={'heartbeat': 165}
+last_signal_today={"v": 1, "action": "heartbeat", "ts": "2026-07-30T14:00:29.495809"}
+---
+bridge_event_counts_today={'OPEN': 0, 'OPEN_FAIL': 0, 'OPEN_BLOCKED_GUARDRAIL': 0, 'OPEN_BLOCKED_PYTHON_PAUSE': 0, 'PYTHON_PAUSE_ENTRIES': 0, 'PYTHON_HARD_STOP': 0, 'CLOSE': 0}
