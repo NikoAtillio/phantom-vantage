@@ -138,6 +138,7 @@ double TieredRiskPct(const double equity);  // [CASH-2]
 double ComputeLotsForSignal(const string dir,const double entry,const double stop,const double qty,const double sacct);
 void   HandlePauseEntries(const string js);
 void   HandleResumeEntries(const string js);
+void   MaybeAutoResumePythonPause();
 void   HandleHardStop(const string js);
 void   HandleFlattenAll(const string js);
 void   HandleOpen(const string js);
@@ -238,6 +239,7 @@ ENUM_BROKER_MODE g_mode = BROKER_CASH;
 bool     g_halted_today   = false;
 bool     g_disabled_perm  = false;
 bool     g_python_paused  = false;    // Python issued pause_entries; blocks new opens
+datetime g_python_pause_until = 0;    // parsed from pause_entries.resume_after
 int      g_cumulative_losses = 0;
 datetime g_halt_serverday = 0;
 double   g_day_start_equity = 0.0;
@@ -1885,6 +1887,14 @@ void HandlePauseEntries(const string js)
    g_python_paused = true;
    string reason = JGetStr(js, "reason");
    string resume = JGetStr(js, "resume_after");
+   g_python_pause_until = 0;
+   if(resume != ""){
+      string rts = resume;
+      StringReplace(rts, "T", " ");
+      int z = StringFind(rts, "Z");
+      if(z >= 0) rts = StringSubstr(rts, 0, z);
+      g_python_pause_until = StringToTime(rts);
+   }
    LogCSV("PYTHON_PAUSE_ENTRIES;reason="+reason+";resume_after="+resume);
    Notify("PHANTOM PAUSE", "Python paused new entries: "+reason+". Resumes: "+resume);
 }
@@ -1896,6 +1906,7 @@ void HandleResumeEntries(const string js)
 
    if(g_python_paused){
       g_python_paused = false;
+      g_python_pause_until = 0;
       changed = true;
    }
 
@@ -1920,6 +1931,21 @@ void HandleResumeEntries(const string js)
    LogCSV("PYTHON_RESUME_ENTRIES;reason="+reason);
    if(changed)
       Notify("PHANTOM RESUME", "Python resumed entries: "+reason);
+}
+
+void MaybeAutoResumePythonPause()
+{
+   if(!g_python_paused) return;
+   if(g_python_pause_until <= 0) return;
+
+   datetime nowt = TimeCurrent();
+   if(nowt < g_python_pause_until) return;
+
+   g_python_paused = false;
+   LogCSV("PYTHON_RESUME_AUTO;reason=resume_after_elapsed;resume_at="+
+          TimeToString(g_python_pause_until, TIME_DATE|TIME_SECONDS));
+   Notify("PHANTOM RESUME", "Auto-resumed entries at resume_after schedule.");
+   g_python_pause_until = 0;
 }
 
 void HandleHardStop(const string js)
@@ -2240,6 +2266,7 @@ int OnInit()
 
 void OnTick()
 {
+   MaybeAutoResumePythonPause();
    ProcessPendingReplayTpCloses();
 
    datetime bt=iTime(g_symbol,PERIOD_M5,0);
@@ -2262,6 +2289,7 @@ void OnTick()
 void OnTimer()
 {
    if(!InpReplayMode){
+      MaybeAutoResumePythonPause();
       PumpFileLive("OnTimer");
       ReconcileBridgeState();
    }
