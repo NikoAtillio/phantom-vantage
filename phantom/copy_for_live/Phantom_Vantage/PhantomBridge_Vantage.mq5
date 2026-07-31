@@ -1447,6 +1447,23 @@ void HandleMeta(const string js)
    LogCSV("META;acct="+DoubleToString(g_meta_acct,2));
 }
 
+bool PositionExistsForSignal(const string id, ulong &out_ticket)
+{
+   out_ticket = 0;
+   for(int pi = PositionsTotal()-1; pi >= 0; pi--){
+      ulong cand = PositionGetTicket(pi);
+      if(cand == 0) continue;
+      if(!PositionSelectByTicket(cand)) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+      if(PositionGetString(POSITION_SYMBOL) != g_symbol) continue;
+      if(PositionGetString(POSITION_COMMENT) == id){
+         out_ticket = cand;
+         return true;
+      }
+   }
+   return false;
+}
+
 void HandleOpen(const string js)
 {
    string id  = JGetStr(js,"id");
@@ -1532,6 +1549,28 @@ void HandleOpen(const string js)
    if(lots<=0){
       LogCSV("OPEN_SKIP_ZEROLOT;"+id);
       return;
+   }
+
+   {
+      ulong existing_tk = 0;
+      if(PositionExistsForSignal(id, existing_tk)){
+         MapId(id, existing_tk);
+         MarkOpenFired(id);
+         int eidx = FindId(id);
+         if(eidx >= 0){
+            g_last_sl[eidx]        = stop;
+            g_sig_entry[eidx]      = entry;
+            g_sig_qty[eidx]        = qty;
+            g_sig_dir[eidx]        = is_long ? 1 : -1;
+            g_open_server_ts[eidx] = TimeCurrent();
+            g_open_fill[eidx]      = PositionGetDouble(POSITION_PRICE_OPEN);
+         }
+         LogCSV("OPEN_ALREADY_EXISTS;"+id+
+                ";ticket="+IntegerToString((long)existing_tk)+
+                ";fill="+DoubleToString(PositionGetDouble(POSITION_PRICE_OPEN),g_digits));
+         CancelPendingOpenById(id, "already_open");
+         return;
+      }
    }
 
    double price = is_long ? SymbolInfoDouble(g_symbol,SYMBOL_ASK)
@@ -1622,6 +1661,83 @@ void HandleOpen(const string js)
                 ";why=retcode_"+IntegerToString(rc)+
                 ";human="+human_rc);
       }
+
+      if(!InpReplayMode && (rc == 10004 || rc == 10020)){
+         for(int retry = 1; retry <= 2; retry++){
+            Sleep(600);
+
+            ulong retry_tk = 0;
+            if(PositionExistsForSignal(id, retry_tk)){
+               MapId(id, retry_tk);
+               MarkOpenFired(id);
+               int ridx = FindId(id);
+               if(ridx >= 0){
+                  g_last_sl[ridx]        = sl;
+                  g_sig_entry[ridx]      = entry;
+                  g_sig_qty[ridx]        = qty;
+                  g_sig_dir[ridx]        = is_long ? 1 : -1;
+                  g_open_server_ts[ridx] = TimeCurrent();
+                  g_open_fill[ridx]      = PositionGetDouble(POSITION_PRICE_OPEN);
+               }
+               LogCSV("OPEN_RETRY_FOUND_EXISTING;"+id+
+                      ";retry="+IntegerToString(retry)+
+                      ";ticket="+IntegerToString((long)retry_tk));
+               CancelPendingOpenById(id, "found_on_retry");
+               return;
+            }
+
+            price = is_long ? SymbolInfoDouble(g_symbol, SYMBOL_ASK)
+                            : SymbolInfoDouble(g_symbol, SYMBOL_BID);
+            sl = ClampStopDistance(price, stop, is_long);
+            double open_sl_retry = InpReplayMode ? 0.0 : sl;
+
+            if(is_long) ok = trade.Buy(lots, g_symbol, 0.0, open_sl_retry, open_tp, id);
+            else        ok = trade.Sell(lots, g_symbol, 0.0, open_sl_retry, open_tp, id);
+
+            rc = (int)trade.ResultRetcode();
+            LogCSV("OPEN_RETRY;"+id+
+                   ";attempt="+IntegerToString(retry)+
+                   ";ret="+IntegerToString(rc)+
+                   ";price="+DoubleToString(price,g_digits));
+
+            if(ok){
+               ulong tk2 = trade.ResultOrder();
+               ulong resolved2 = 0;
+               for(int pi=PositionsTotal()-1; pi>=0; pi--){
+                  ulong cand=PositionGetTicket(pi);
+                  if(cand==0) continue;
+                  if(!PositionSelectByTicket(cand)) continue;
+                  if(PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
+                  if(PositionGetString(POSITION_SYMBOL)!=g_symbol) continue;
+                  if(PositionGetString(POSITION_COMMENT)==id){ resolved2=cand; break; }
+               }
+               if(resolved2!=0) tk2=resolved2;
+               MapId(id,tk2);
+               MarkOpenFired(id);
+               int idx2=FindId(id);
+               if(idx2>=0){
+                  g_last_sl[idx2]        = sl;
+                  g_sig_entry[idx2]      = entry;
+                  g_sig_qty[idx2]        = qty;
+                  g_sig_dir[idx2]        = is_long ? 1 : -1;
+                  g_open_server_ts[idx2] = TimeCurrent();
+                  g_open_fill[idx2]      = (trade.ResultPrice()>0.0) ? trade.ResultPrice() : entry;
+               }
+               LogCSV("OPEN_RETRY_SUCCESS;"+id+
+                      ";attempt="+IntegerToString(retry)+
+                      ";dir="+dir+";lots="+DoubleToString(lots,2)+
+                      ";fill="+DoubleToString(trade.ResultPrice(),g_digits)+
+                      ";sl="+DoubleToString(sl,g_digits)+
+                      ";tp="+DoubleToString(open_tp,g_digits));
+               RetryPendingActions();
+               CancelPendingOpenById(id, "retry_success");
+               return;
+            }
+
+            if(rc != 10004 && rc != 10020) break;
+         }
+      }
+
       if(IsTransientOpenRetcode(rc) && !InpReplayMode){
          UpsertPendingOpen(id, js);
          LogCSV("OPEN_PENDING;"+id+";ret="+IntegerToString(rc));

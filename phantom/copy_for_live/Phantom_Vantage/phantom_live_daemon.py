@@ -403,6 +403,57 @@ def _atomic_append_lines(path: str, lines: List[str]) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ROLLING-WINDOW OUTPUT FILTER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _filter_events_rolling_window(
+    events: List[dict],
+    window_hours: float = 1.0,
+) -> List[dict]:
+    """
+    Allow only recent open events through during poll cycles.
+
+    The engine still runs over full history to preserve capital/trade state,
+    but poll-cycle appends should only consider opens from the recent window.
+    All other actions pass through and remain protected by fingerprint dedup
+    and the forward-only open watermark.
+    """
+    cutoff = datetime.utcnow() - timedelta(hours=window_hours)
+    filtered: List[dict] = []
+    skipped = 0
+
+    for ev in events:
+        action = str(ev.get("action", ""))
+        if action != "open":
+            filtered.append(ev)
+            continue
+
+        ts_raw = str(ev.get("entry_ts", ev.get("signal_ts", ""))).strip()
+        if not ts_raw:
+            filtered.append(ev)
+            continue
+
+        try:
+            ev_ts = datetime.fromisoformat(ts_raw.replace("Z", "").replace("T", " "))
+        except (ValueError, AttributeError):
+            filtered.append(ev)
+            continue
+
+        if ev_ts >= cutoff:
+            filtered.append(ev)
+        else:
+            skipped += 1
+
+    if skipped:
+        print(
+            f"[daemon] rolling-window filter: dropped {skipped} open event(s) "
+            f"older than {window_hours}h (cutoff={cutoff.isoformat()})"
+        )
+
+    return filtered
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ENGINE RUNNER
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1051,6 +1102,8 @@ def main() -> None:
             except pd.errors.EmptyDataError:
                 print("[daemon] transient CSV read race (empty file), skipping this poll")
                 continue
+
+            events = _filter_events_rolling_window(events, window_hours=1.0)
             watcher.update()
             appended = writer.append_new(events)
             if appended == 0:
