@@ -1075,10 +1075,12 @@ bool IsSignalTooOldForLive(const string js, const string action, const string id
    if(age_sec < 0) return false;
 
    if(age_sec > (InpMaxSignalAgeMinutes * 60)){
-      LogCSV(action+"_SKIP_STALE;"+id+
-             ";age_sec="+IntegerToString(age_sec)+
-             ";max_min="+IntegerToString(InpMaxSignalAgeMinutes)+
-             ";ts="+TimeToString(ts, TIME_DATE|TIME_SECONDS));
+      string stale_msg = action+"_SKIP_STALE;"+id+
+                         ";age_sec="+IntegerToString(age_sec)+
+                         ";max_min="+IntegerToString(InpMaxSignalAgeMinutes)+
+                         ";ts="+TimeToString(ts, TIME_DATE|TIME_SECONDS);
+      LogCSV(stale_msg);
+      PrintFormat("PhantomBridge STALE SKIP | %s", stale_msg);
       return true;
    }
 

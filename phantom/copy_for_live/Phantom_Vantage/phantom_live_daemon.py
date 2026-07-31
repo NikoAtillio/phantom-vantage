@@ -58,7 +58,7 @@ import sys
 import tempfile
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
@@ -167,6 +167,20 @@ def _event_fingerprint(event: dict) -> str:
 
     raw = "|".join(parts)
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def _parse_event_ts(event: dict) -> Optional[datetime]:
+    """Extract the primary timestamp from an event for chronological guards."""
+    for key in ("entry_ts", "signal_ts"):
+        raw = str(event.get(key) or "").strip()
+        if not raw:
+            continue
+        raw = raw.replace("T", " ").replace("Z", "")
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            continue
+    return None
 
 
 def _round_str(v, decimals: int = 5) -> str:
@@ -604,6 +618,7 @@ class SignalWriter:
         self._open_state: Dict[str, Dict[str, float]] = {}
         self._latest_stop_by_id: Dict[str, float] = {}
         self._last_heartbeat = 0.0
+        self._latest_open_ts: Optional[datetime] = None
 
         # Persist dedup state across daemon restarts.
         self._load_fp_cache()
@@ -680,6 +695,10 @@ class SignalWriter:
                         continue
                     self._written_fps.add(_event_fingerprint(ev))
                     self._ingest_canonical_state(ev)
+                    if ev.get("action") == "open":
+                        ev_ts = _parse_event_ts(ev)
+                        if ev_ts and (self._latest_open_ts is None or ev_ts > self._latest_open_ts):
+                            self._latest_open_ts = ev_ts
             if self._written_fps:
                 print(f"[daemon] bootstrapped {len(self._written_fps)} fingerprints from signal file")
                 self._save_fp_cache()
@@ -768,6 +787,10 @@ class SignalWriter:
             lines.append(line)
             self._written_fps.add(fp)
             self._ingest_canonical_state(canon_ev)
+            if canon_ev.get("action") == "open":
+                ev_ts = _parse_event_ts(canon_ev)
+                if ev_ts and (self._latest_open_ts is None or ev_ts > self._latest_open_ts):
+                    self._latest_open_ts = ev_ts
 
         # Overwrite (not append) on initial write
         blob = "\n".join(lines) + ("\n" if lines else "")
@@ -796,15 +819,37 @@ class SignalWriter:
                 so multiple modify events for the same id are each unique.
         FIX-2: identical control events from successive reruns are suppressed.
         """
+        open_lag_grace = timedelta(minutes=10)
         new_lines: List[str] = []
         for ev in events:
             canon_ev = self._canonicalize_event(ev)
+
+            # Forward-only open gate: skip retroactive opens discovered on reruns.
+            if canon_ev.get("action") == "open" and self._latest_open_ts is not None:
+                ev_ts = _parse_event_ts(canon_ev)
+                if ev_ts is not None:
+                    threshold = self._latest_open_ts - open_lag_grace
+                    if ev_ts < threshold:
+                        lag_min = int((self._latest_open_ts - ev_ts).total_seconds() / 60)
+                        print(
+                            f"[daemon] SKIP_STALE_OPEN id={canon_ev.get('id', '')} "
+                            f"entry_ts={canon_ev.get('entry_ts', '')} "
+                            f"watermark={self._latest_open_ts.isoformat()} "
+                            f"lag_min={lag_min}"
+                        )
+                        continue
+
             fp = _event_fingerprint(canon_ev)
             if fp in self._written_fps:
                 continue
             self._written_fps.add(fp)
             new_lines.append(self._serialise_event(canon_ev))
             self._ingest_canonical_state(canon_ev)
+
+            if canon_ev.get("action") == "open":
+                ev_ts = _parse_event_ts(canon_ev)
+                if ev_ts and (self._latest_open_ts is None or ev_ts > self._latest_open_ts):
+                    self._latest_open_ts = ev_ts
 
         if not new_lines:
             return 0
