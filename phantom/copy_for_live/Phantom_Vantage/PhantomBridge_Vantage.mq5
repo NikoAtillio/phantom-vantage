@@ -50,7 +50,7 @@
 //|              at the next server-day rollover.                      |
 //|    [CASH-7]  Circuit breaker at % of daily loss allowance.         |
 //|              Soft-stop fires at InpCircuitBreakerPct% (default     |
-//|              80%) of the daily limit; stops new opens but does     |
+//|              90%) of the daily limit; stops new opens but does     |
 //|              not flatten.  Clears on next server day.              |
 //|    [CASH-8]  FTMO-only controls removed.                           |
 //|              InpFtmoRiskPct, InpFtmoMaxLeverage, InpMaxLossPct,    |
@@ -175,7 +175,7 @@ input double  InpStartCapOverride    = 10000.0;                 // fixed risk-ba
 
 // --- shared guardrails ---
 input double  InpDailyLossPct        = 4.5;                     // [CASH-6] daily loss limit, % off day-start balance
-input double  InpCircuitBreakerPct   = 80.0;                    // [CASH-7] soft stop: 80% of daily limit amount
+input double  InpCircuitBreakerPct   = 90.0;                    // [CASH-7] soft stop: 90% of daily limit amount
 // [CASH-9] No profit_target or min_trading_days inputs
 
 // --- CASH tiered risk inputs --- [CASH-2]
@@ -1353,7 +1353,7 @@ bool GuardrailBlock()
    double daily_loss    = g_day_start_equity - eq;
    double breaker_level = daily_amount * (InpCircuitBreakerPct/100.0);  // [CASH-7]
 
-   // ---- circuit breaker: soft stop at 80% of daily amount ---- [CASH-7]
+   // ---- circuit breaker: soft stop at configured % of daily amount ---- [CASH-7]
    if(daily_loss >= breaker_level && daily_loss < daily_amount){
       LogCSV("CIRCUIT_BREAKER;loss="+DoubleToString(daily_loss,2)+
              ";level="+DoubleToString(breaker_level,2)+";amount="+DoubleToString(daily_amount,2));
