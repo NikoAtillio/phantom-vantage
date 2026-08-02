@@ -634,6 +634,15 @@ void ReconcileBridgeState()
          ClearSignalMaps();
          LogCSV("RECONCILE_CLEAR;reason=no_live_positions");
       }
+
+      // No live positions remain, so queued modify/close actions cannot resolve.
+      // Drop them with an explicit audit trail to avoid stale queue buildup.
+      for(int i=ArraySize(g_pending_action_ids)-1; i>=0; i--){
+         LogCSV("DROP_STALE_PENDING;"+g_pending_action_kind[i]+";"+g_pending_action_ids[i]+
+                ";reason=reconcile_clear_no_live_positions");
+         RemovePendingActionAt(i);
+      }
+
       g_unmapped_first_seen = 0;
       g_orphan_alerted = false;
       g_stale_cursor_alerted = false;
@@ -685,11 +694,25 @@ void RetryPendingActions()
       string kind = g_pending_action_kind[i];
       string id = g_pending_action_ids[i];
 
+      // If there is no mapped live position for this id, keep only fresh entries.
+      // Older orphaned actions are dropped to prevent permanent queue residue.
+      int idx = FindId(id);
+      if(idx < 0){
+         if(InpMaxSignalAgeMinutes > 0){
+            int age_sec = (int)(nowt - g_pending_action_first_ts[i]);
+            int max_sec = InpMaxSignalAgeMinutes * 60;
+            if(age_sec > max_sec){
+               LogCSV("DROP_STALE_PENDING;"+kind+";"+id+
+                      ";age_sec="+IntegerToString(age_sec)+
+                      ";reason=no_live_position_and_expired");
+               RemovePendingActionAt(i);
+            }
+         }
+         continue;
+      }
+
       if(g_pending_action_last_try[i] > 0 && (nowt - g_pending_action_last_try[i]) < 15)
          continue;
-
-      int idx = FindId(id);
-      if(idx < 0) continue;
 
       ulong tk = g_tickets[idx];
       if(!PositionSelectByTicket(tk)) continue;
