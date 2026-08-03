@@ -231,6 +231,21 @@ def _read_latest_mt5_bar_ts_close(path: str) -> Optional[tuple[datetime, float]]
     return None
 
 
+def _parse_trade_id_entry_ts(trade_id: str) -> Optional[datetime]:
+    """Parse leading YYYY-MM-DDTHH:MM:SS timestamp prefix from trade id."""
+    raw = str(trade_id or "").strip()
+    if not raw:
+        return None
+    p = raw.find("#")
+    if p <= 0:
+        return None
+    ts_raw = raw[:p].replace("T", " ")
+    try:
+        return datetime.fromisoformat(ts_raw)
+    except ValueError:
+        return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MT5 COMMON/FILES PATH DISCOVERY
 # ─────────────────────────────────────────────────────────────────────────────
@@ -706,13 +721,15 @@ class SignalWriter:
         self._written_fps: Set[str] = set()   # fingerprints already on disk
         self._open_state: Dict[str, Dict[str, float]] = {}
         self._latest_stop_by_id: Dict[str, float] = {}
+        self._last_close_ts_by_id: Dict[str, datetime] = {}
         self._last_heartbeat = 0.0
         self._latest_open_ts: Optional[datetime] = None
 
         # Persist dedup state across daemon restarts.
         self._load_fp_cache()
-        if not self._written_fps:
-            self._bootstrap_fp_cache_from_signal_file()
+        # Always rebuild canonical trade state from the existing stream.
+        # Fingerprint cache and open-state are separate concerns.
+        self._bootstrap_fp_cache_from_signal_file()
 
     def has_existing_signal_stream(self) -> bool:
         """True if any known target signal file already exists and has content."""
@@ -803,6 +820,12 @@ class SignalWriter:
             return
 
         if action == "open":
+            open_ts = _parse_event_ts(ev)
+            last_close_ts = self._last_close_ts_by_id.get(trade_id)
+            # Ignore stale/duplicated historical opens that appear after a known close.
+            if last_close_ts is not None and open_ts is not None and open_ts <= last_close_ts:
+                return
+
             self._open_state[trade_id] = {
                 "entry": float(ev.get("entry", 0.0) or 0.0),
                 "stop": float(ev.get("stop", 0.0) or 0.0),
@@ -821,6 +844,11 @@ class SignalWriter:
                 if trade_id in self._open_state:
                     self._open_state[trade_id]["stop"] = stop_val
         elif action == "close":
+            close_ts = _parse_event_ts(ev)
+            if close_ts is not None:
+                prev_close = self._last_close_ts_by_id.get(trade_id)
+                if prev_close is None or close_ts > prev_close:
+                    self._last_close_ts_by_id[trade_id] = close_ts
             self._open_state.pop(trade_id, None)
             self._latest_stop_by_id.pop(trade_id, None)
 
@@ -872,6 +900,7 @@ class SignalWriter:
         self._written_fps.clear()
         self._open_state.clear()
         self._latest_stop_by_id.clear()
+        self._last_close_ts_by_id.clear()
         lines: List[str] = []
         for ev in events:
             canon_ev = self._canonicalize_event(ev)
@@ -962,6 +991,7 @@ class SignalWriter:
         bar_ts: datetime,
         bar_close: float,
         atr_trail_mult: float = 0.8,
+        max_trade_age_days: float = 7.0,
     ) -> int:
         """
         Continuity fix for restart/week-roll scenarios:
@@ -974,6 +1004,14 @@ class SignalWriter:
 
         new_lines: List[str] = []
         for trade_id, st in list(self._open_state.items()):
+            # Never resurrect very old historical ids into live carry flow.
+            # Carry-trailing is intended for currently relevant live positions.
+            entry_ts = _parse_trade_id_entry_ts(trade_id)
+            if entry_ts is not None and max_trade_age_days > 0:
+                age_days = (bar_ts - entry_ts).total_seconds() / 86400.0
+                if age_days > max_trade_age_days:
+                    continue
+
             direction = str(st.get("dir", "") or "").lower()
             atr_entry = float(st.get("atr_entry", 0.0) or 0.0)
             cur_stop = float(st.get("stop", 0.0) or 0.0)
@@ -1000,7 +1038,9 @@ class SignalWriter:
                 "v": engine.SIGNAL_SCHEMA_VERSION,
                 "action": "modify",
                 "id": trade_id,
-                "signal_ts": datetime.utcnow().isoformat(),
+                # Use market-data clock (broker-exported bar timestamp) so MT5
+                # stale-age checks evaluate carry events in the same time domain.
+                "signal_ts": bar_ts.isoformat(),
                 "new_stop": float(new_stop),
                 "reason": "trail_carry",
             }
@@ -1152,6 +1192,8 @@ def main() -> None:
         sys.exit("[daemon] FATAL on initial engine run: exhausted retries")
 
     if writer.has_existing_signal_stream():
+        # Restart recovery should not append historical opens again.
+        events = _filter_events_rolling_window(events, window_hours=1.0)
         appended = writer.append_new(events)
         print(f"[daemon] startup recovery mode: appended {appended} unseen event(s)")
     else:
@@ -1167,6 +1209,7 @@ def main() -> None:
             bar_ts=bar_ts,
             bar_close=bar_close,
             atr_trail_mult=float(engine.ACTIVE_SCENARIO_CFG.get("atr_trail", 0.8) or 0.8),
+            max_trade_age_days=7.0,
         )
         if carry_added > 0:
             print(f"[daemon] startup carry trailing appended {carry_added} modify event(s)")
@@ -1241,6 +1284,7 @@ def main() -> None:
                     bar_ts=bar_ts,
                     bar_close=bar_close,
                     atr_trail_mult=float(engine.ACTIVE_SCENARIO_CFG.get("atr_trail", 0.8) or 0.8),
+                    max_trade_age_days=7.0,
                 )
             if appended == 0:
                 if carry_added == 0:

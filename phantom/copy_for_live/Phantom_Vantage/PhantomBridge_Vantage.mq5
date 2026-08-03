@@ -1091,6 +1091,13 @@ bool IsSignalTooOldForLive(const string js, const string action, const string id
    if(InpReplayMode) return false;
    if(InpMaxSignalAgeMinutes <= 0) return false;
 
+   // Carry-forward trailing adjusts an already-open live position after
+   // restart/week rollover. Do not stale-drop these maintenance modifies.
+   if(action == "MODIFY"){
+      string r = JGetStr(js, "reason");
+      if(r == "trail_carry") return false;
+   }
+
    datetime ts = ParseSignalTime(js);
    if(ts <= 0) return false;
 
