@@ -53,6 +53,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import sys
 import tempfile
@@ -191,6 +192,43 @@ def _round_str(v, decimals: int = 5) -> str:
         return f"{float(v):.{decimals}f}"
     except (TypeError, ValueError):
         return str(v)
+
+
+def _read_latest_mt5_bar_ts_close(path: str) -> Optional[tuple[datetime, float]]:
+    """
+    Read the latest MT5 TSV bar from `path` and return (bar_ts, close).
+
+    Expected row shape:
+      <DATE> <TIME> <OPEN> <HIGH> <LOW> <CLOSE> ...
+    Example:
+      2026.08.03 17:46:00 28595.65 28625.40 28595.65 28621.65 ...
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+
+    if not lines:
+        return None
+
+    # Walk backwards in case the file has a trailing blank line.
+    for raw in reversed(lines):
+        ln = raw.strip()
+        if not ln:
+            continue
+        parts = re.split(r"\s+", ln)
+        # Need at least DATE TIME OPEN HIGH LOW CLOSE.
+        if len(parts) < 6:
+            continue
+        try:
+            ts = datetime.strptime(parts[0] + " " + parts[1], "%Y.%m.%d %H:%M:%S")
+            close_px = float(parts[5])
+            return ts, close_px
+        except (ValueError, TypeError):
+            continue
+
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -770,6 +808,8 @@ class SignalWriter:
                 "stop": float(ev.get("stop", 0.0) or 0.0),
                 "tp": float(ev.get("tp", 0.0) or 0.0),
                 "qty": float(ev.get("qty", 0.0) or 0.0),
+                "dir": str(ev.get("dir", "") or ""),
+                "atr_entry": float(ev.get("atr_entry", 0.0) or 0.0),
             }
             stop_val = float(ev.get("stop", 0.0) or 0.0)
             if stop_val > 0.0:
@@ -778,6 +818,8 @@ class SignalWriter:
             stop_val = float(ev.get("new_stop", 0.0) or 0.0)
             if stop_val > 0.0:
                 self._latest_stop_by_id[trade_id] = stop_val
+                if trade_id in self._open_state:
+                    self._open_state[trade_id]["stop"] = stop_val
         elif action == "close":
             self._open_state.pop(trade_id, None)
             self._latest_stop_by_id.pop(trade_id, None)
@@ -915,6 +957,76 @@ class SignalWriter:
         self._save_fp_cache()
         return len(new_lines)
 
+    def append_carry_trailing_modifies(
+        self,
+        bar_ts: datetime,
+        bar_close: float,
+        atr_trail_mult: float = 0.8,
+    ) -> int:
+        """
+        Continuity fix for restart/week-roll scenarios:
+        if a trade is still open in the signal stream, keep advancing its stop
+        on fresh bars using the same ATR-entry trailing shape, even when a
+        replayed engine run does not re-materialize that historic open.
+        """
+        if bar_close <= 0.0 or atr_trail_mult <= 0.0:
+            return 0
+
+        new_lines: List[str] = []
+        for trade_id, st in list(self._open_state.items()):
+            direction = str(st.get("dir", "") or "").lower()
+            atr_entry = float(st.get("atr_entry", 0.0) or 0.0)
+            cur_stop = float(st.get("stop", 0.0) or 0.0)
+
+            if direction not in ("long", "short"):
+                continue
+            if atr_entry <= 0.0:
+                continue
+
+            trail_dist = atr_trail_mult * atr_entry
+            if direction == "long":
+                candidate = bar_close - trail_dist
+                new_stop = max(cur_stop, candidate)
+                improved = (new_stop - cur_stop) > 1e-9
+            else:
+                candidate = bar_close + trail_dist
+                new_stop = min(cur_stop, candidate) if cur_stop > 0.0 else candidate
+                improved = (cur_stop - new_stop) > 1e-9 if cur_stop > 0.0 else True
+
+            if not improved:
+                continue
+
+            ev = {
+                "v": engine.SIGNAL_SCHEMA_VERSION,
+                "action": "modify",
+                "id": trade_id,
+                "signal_ts": bar_ts.isoformat(),
+                "new_stop": float(new_stop),
+                "reason": "trail_carry",
+            }
+
+            fp = _event_fingerprint(ev)
+            if fp in self._written_fps:
+                continue
+
+            self._written_fps.add(fp)
+            self._open_state[trade_id]["stop"] = float(new_stop)
+            self._latest_stop_by_id[trade_id] = float(new_stop)
+            new_lines.append(self._serialise_event(ev))
+
+        if not new_lines:
+            return 0
+
+        for target in [self.local_path] + self.mt5_paths:
+            _atomic_append_lines(target, new_lines)
+
+        print(
+            f"[daemon] {datetime.utcnow().isoformat()} "
+            f"appended {len(new_lines)} carry-trailing modify event(s)"
+        )
+        self._save_fp_cache()
+        return len(new_lines)
+
     def maybe_heartbeat(self, interval_s: float = 300.0) -> None:
         """Append a heartbeat line when the interval has elapsed."""
         now = time.monotonic()
@@ -1044,6 +1156,21 @@ def main() -> None:
         print(f"[daemon] startup recovery mode: appended {appended} unseen event(s)")
     else:
         writer.write_initial(events)
+
+    carry_tf_path = args.m5
+    if str(engine.ACTIVE_SCENARIO_CFG.get("entry_tf", "m5")).lower() == "m1":
+        carry_tf_path = args.m1
+    latest_bar = _read_latest_mt5_bar_ts_close(carry_tf_path)
+    if latest_bar is not None:
+        bar_ts, bar_close = latest_bar
+        carry_added = writer.append_carry_trailing_modifies(
+            bar_ts=bar_ts,
+            bar_close=bar_close,
+            atr_trail_mult=float(engine.ACTIVE_SCENARIO_CFG.get("atr_trail", 0.8) or 0.8),
+        )
+        if carry_added > 0:
+            print(f"[daemon] startup carry trailing appended {carry_added} modify event(s)")
+
     watcher.snapshot()
     print(f"[daemon] initial pass complete. {len(events)} events written. Entering poll loop …\n")
 
@@ -1106,8 +1233,18 @@ def main() -> None:
             events = _filter_events_rolling_window(events, window_hours=1.0)
             watcher.update()
             appended = writer.append_new(events)
+            latest_bar = _read_latest_mt5_bar_ts_close(carry_tf_path)
+            carry_added = 0
+            if latest_bar is not None:
+                bar_ts, bar_close = latest_bar
+                carry_added = writer.append_carry_trailing_modifies(
+                    bar_ts=bar_ts,
+                    bar_close=bar_close,
+                    atr_trail_mult=float(engine.ACTIVE_SCENARIO_CFG.get("atr_trail", 0.8) or 0.8),
+                )
             if appended == 0:
-                print("[daemon] no new events (all fingerprints already written)")
+                if carry_added == 0:
+                    print("[daemon] no new events (all fingerprints already written)")
 
         except KeyboardInterrupt:
             print("\n[daemon] interrupted by user. Exiting.")
