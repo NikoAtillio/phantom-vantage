@@ -44,6 +44,7 @@ input bool    InpShowHUD      = true;          // Show corner HUD panel
 input bool    InpShowControlPanel = true;      // Show pause status + manual resume button
 input int     InpPollSecs     = 5;             // Poll interval (seconds)
 input int     InpHistoryTrades= 20;            // How many closed trades to keep drawn
+input bool    InpDrawOpenOnlyIfBrokerLive = true; // Draw open overlays only when matching broker position exists
 input bool    InpHideMarkersBeforeWeekStart = true; // Hide historical markers from prior weeks (server Sunday rollover)
 input string  InpDailyResumeFlagFile = "phantom_live/cash_daily_resume.flag"; // Common\\Files flag for Python daily soft-resume
 input string  InpMasterControlFile = "phantom_live/master_control.flag"; // Common\\Files master pause/resume control file
@@ -117,6 +118,10 @@ void _HSeg(const string &nm, const datetime t0, const datetime t1, const double 
 //| Init                                                              |
 //+------------------------------------------------------------------+
 int OnInit() {
+   // Defensive cleanup: if prior detach/crash left overlay objects behind,
+   // clear this indicator namespace before rebuilding from signals.
+   _DeleteAllObjects();
+
    if(!InpShowEMAs) {
       // hide buffers
       PlotIndexSetInteger(0, PLOT_DRAW_TYPE, DRAW_NONE);
@@ -304,6 +309,10 @@ void _DoOpen(const string &ln) {
    if(id == "") return;
    int i = _GetOrAddTrade(id);
 
+   // On daemon restart, historical opens can be replayed.
+   // If this trade was already closed in the stream, do not re-open visually.
+   if(g_trades[i].close_ts > 0) return;
+
    g_trades[i].id       = id;
    g_trades[i].dir      = _JStr(ln, "dir");
    g_trades[i].entry    = _JDbl(ln, "entry");
@@ -418,7 +427,12 @@ void _RedrawAll() {
    for(int i = 0; i < g_ntrades; i++) {
       // Draw open trades always; draw recent closed trades up to InpHistoryTrades
       if(g_trades[i].is_open)
+      {
+         // Guard against orphan signal opens that no longer exist on broker.
+         if(InpDrawOpenOnlyIfBrokerLive && !_HasLivePosition(g_trades[i].id))
+            continue;
          _DrawTrade(i, true);
+      }
       else if(i >= g_ntrades - InpHistoryTrades) {
          if(InpHideMarkersBeforeWeekStart) {
             datetime anchor = (g_trades[i].close_ts > 0) ? g_trades[i].close_ts : g_trades[i].entry_ts;
@@ -603,7 +617,22 @@ string _ShortTradeId(const string &id)
 {
    int hashPos = StringFind(id, "#");
    if(hashPos >= 0 && hashPos + 1 < StringLen(id))
-      return StringSubstr(id, hashPos + 1);
+   {
+      string n = StringSubstr(id, hashPos + 1);
+
+      // Many historical IDs can share the same "#N" suffix after restarts.
+      // Add a compact day+time hint so labels remain unique on chart.
+      // Expected id shape: YYYY-MM-DDTHH:MM:SS#N
+      if(hashPos >= 16)
+      {
+         string dd = StringSubstr(id, 8, 2);
+         string hh = StringSubstr(id, 11, 2);
+         string mm = StringSubstr(id, 14, 2);
+         return n + "@" + dd + hh + mm;
+      }
+
+      return n;
+   }
 
    string cleaned = id;
    StringReplace(cleaned, "-", "");
@@ -702,7 +731,7 @@ void _VLine(const string &nm, const datetime t, const color c, const string tip)
 void _UpdateHUD() {
    int open_cnt = 0;
    for(int i = 0; i < g_ntrades; i++)
-      if(g_trades[i].is_open) open_cnt++;
+   if(g_trades[i].is_open && (!InpDrawOpenOnlyIfBrokerLive || _HasLivePosition(g_trades[i].id))) open_cnt++;
 
    string bias = _RegimeBias(g_last_regime);
    string status;
