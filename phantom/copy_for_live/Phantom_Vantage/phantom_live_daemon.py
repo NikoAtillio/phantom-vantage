@@ -1000,7 +1000,7 @@ class SignalWriter:
                 "v": engine.SIGNAL_SCHEMA_VERSION,
                 "action": "modify",
                 "id": trade_id,
-                "signal_ts": bar_ts.isoformat(),
+                "signal_ts": datetime.utcnow().isoformat(),
                 "new_stop": float(new_stop),
                 "reason": "trail_carry",
             }
