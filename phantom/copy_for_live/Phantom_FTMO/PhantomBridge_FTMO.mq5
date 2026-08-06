@@ -167,7 +167,7 @@ double   g_meta_acct   = 0.0;
 double   g_ftmo_total_floor            = 0.0;   // InpAccountSize * (1 - InpMaxTotalLossPct/100)
 double   g_ftmo_daily_limit_abs        = 0.0;   // InpAccountSize * (InpMaxDailyLossPct/100)
 double   g_ftmo_daily_buffer_abs       = 0.0;   // g_ftmo_daily_limit_abs * (InpBufferPct/100)
-double   g_ftmo_total_buffer_threshold = 0.0;   // g_ftmo_total_floor + g_ftmo_daily_limit_abs*(1 - InpBufferPct/100)
+double   g_ftmo_total_buffer_threshold = 0.0;   // g_ftmo_total_floor + (InpAccountSize*InpMaxTotalLossPct/100)*(1 - InpBufferPct/100)
 
 //==== DAILY TRACKING (Prague) ====
 double   g_today_realised_pnl = 0.0;    // sum of closed trade P&L since last Prague midnight
@@ -678,6 +678,14 @@ datetime ParseSignalTime(const string js)
 bool IsSignalTooOldForLive(const string js, const string action, const string id)
 {
    if(InpMaxSignalAgeMinutes <= 0) return false;
+
+   // Carry-forward trailing modifies maintain existing live trades across
+   // restart/week rollover and must not be stale-dropped.
+   if(action == "MODIFY"){
+      string r = JGetStr(js, "reason");
+      if(r == "trail_carry") return false;
+   }
+
    datetime ts = ParseSignalTime(js);
    if(ts <= 0) return false;
    int age_sec = (int)(TimeCurrent() - ts);
@@ -2234,7 +2242,8 @@ int OnInit()
    g_ftmo_total_floor            = InpAccountSize * (1.0 - InpMaxTotalLossPct/100.0);
    g_ftmo_daily_limit_abs        = InpAccountSize * (InpMaxDailyLossPct/100.0);
    g_ftmo_daily_buffer_abs       = g_ftmo_daily_limit_abs * (InpBufferPct/100.0);
-   g_ftmo_total_buffer_threshold = g_ftmo_total_floor + g_ftmo_daily_limit_abs * (1.0 - InpBufferPct/100.0);
+      double total_limit_abs        = InpAccountSize * (InpMaxTotalLossPct/100.0);
+      g_ftmo_total_buffer_threshold = g_ftmo_total_floor + total_limit_abs * (1.0 - InpBufferPct/100.0);
 
    // --- per-login FTMO state files --- [FTMO-8]
    g_login = AccountInfoInteger(ACCOUNT_LOGIN);

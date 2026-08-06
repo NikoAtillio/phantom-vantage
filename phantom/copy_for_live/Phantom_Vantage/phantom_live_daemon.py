@@ -269,23 +269,49 @@ def _find_mt5_common_files() -> List[str]:
                          "MetaQuotes", "Terminal", "Common", "Files")
         )
     else:
-        # macOS / Linux: Wine prefix
-        wp = (
-            os.environ.get("WINEPREFIX")
-            or os.path.expanduser(
-                "~/Library/Application Support/net.metaquotes.wine.metatrader5"
+        # macOS / Linux: Wine prefixes
+        # If WINEPREFIX is set, honor it exactly.
+        # Otherwise, scan all MT5-like prefixes so parallel clones (e.g. *-ftmo)
+        # are discovered and kept in sync.
+        env_wp = os.environ.get("WINEPREFIX")
+        if env_wp:
+            wine_prefixes = [env_wp]
+            sibling_prefixes = sorted(
+                glob.glob(
+                    os.path.expanduser(
+                        "~/Library/Application Support/net.metaquotes.wine.metatrader5*"
+                    )
+                )
             )
-        )
-        candidates += glob.glob(
-            os.path.join(wp, "drive_c", "users", "*",
-                         "AppData", "Roaming", "MetaQuotes", "Terminal",
-                         "Common", "Files")
-        )
-        candidates += glob.glob(
-            os.path.join(wp, "drive_c", "Users", "*",
-                         "AppData", "Roaming", "MetaQuotes", "Terminal",
-                         "Common", "Files")
-        )
+            for candidate in sibling_prefixes:
+                if candidate not in wine_prefixes:
+                    wine_prefixes.append(candidate)
+        else:
+            wine_prefixes = sorted(
+                glob.glob(
+                    os.path.expanduser(
+                        "~/Library/Application Support/net.metaquotes.wine.metatrader5*"
+                    )
+                )
+            )
+            if not wine_prefixes:
+                wine_prefixes = [
+                    os.path.expanduser(
+                        "~/Library/Application Support/net.metaquotes.wine.metatrader5"
+                    )
+                ]
+
+        for wp in wine_prefixes:
+            candidates += glob.glob(
+                os.path.join(wp, "drive_c", "users", "*",
+                             "AppData", "Roaming", "MetaQuotes", "Terminal",
+                             "Common", "Files")
+            )
+            candidates += glob.glob(
+                os.path.join(wp, "drive_c", "Users", "*",
+                             "AppData", "Roaming", "MetaQuotes", "Terminal",
+                             "Common", "Files")
+            )
 
     seen: Set[str] = set()
     result: List[str] = []
