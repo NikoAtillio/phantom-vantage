@@ -140,10 +140,12 @@ def _event_fingerprint(event: dict) -> str:
     elif action in ("close",):
         reason = str(event.get("reason", "")).lower()
         if reason == "eod":
+            eod_day = str(event.get("signal_ts", ""))[:10]
             parts = [
                 action,
                 str(event.get("id", "")),
                 reason,
+                eod_day,
             ]
         else:
             parts = [
@@ -488,6 +490,8 @@ def _atomic_append_lines(path: str, lines: List[str]) -> None:
 def _filter_events_rolling_window(
     events: List[dict],
     window_hours: float = 1.0,
+    broker_offset_hours: float = 0.0,
+    drop_log_limit: int = 5,
 ) -> List[dict]:
     """
     Allow only recent open events through during poll cycles.
@@ -497,9 +501,11 @@ def _filter_events_rolling_window(
     All other actions pass through and remain protected by fingerprint dedup
     and the forward-only open watermark.
     """
-    cutoff = datetime.utcnow() - timedelta(hours=window_hours)
+    effective_window_hours = max(0.0, float(window_hours)) + max(0.0, float(broker_offset_hours))
+    cutoff = datetime.utcnow() - timedelta(hours=effective_window_hours)
     filtered: List[dict] = []
     skipped = 0
+    drop_logs = 0
 
     for ev in events:
         action = str(ev.get("action", ""))
@@ -522,11 +528,22 @@ def _filter_events_rolling_window(
             filtered.append(ev)
         else:
             skipped += 1
+            if drop_logs < max(0, int(drop_log_limit)):
+                drop_logs += 1
+                print(
+                    "[daemon] ROLLING_WINDOW_DROP"
+                    f" id={ev.get('id', '')}"
+                    f" entry_ts={ts_raw}"
+                    f" cutoff={cutoff.isoformat()}"
+                    f" window_h={window_hours:.2f}"
+                    f" offset_h={broker_offset_hours:.2f}"
+                )
 
     if skipped:
         print(
             f"[daemon] rolling-window filter: dropped {skipped} open event(s) "
-            f"older than {window_hours}h (cutoff={cutoff.isoformat()})"
+            f"older than {window_hours}h+offset {broker_offset_hours}h "
+            f"(cutoff={cutoff.isoformat()})"
         )
 
     return filtered
@@ -738,7 +755,7 @@ class SignalWriter:
     fingerprints, and appends only those that haven't been written yet.
     """
 
-    def __init__(self, signal_filename: str, output_dir: str):
+    def __init__(self, signal_filename: str, output_dir: str, open_lag_grace_minutes: int = 10):
         self.signal_filename = signal_filename
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
@@ -750,6 +767,7 @@ class SignalWriter:
         self._last_close_ts_by_id: Dict[str, datetime] = {}
         self._last_heartbeat = 0.0
         self._latest_open_ts: Optional[datetime] = None
+        self._open_lag_grace = timedelta(minutes=max(1, int(open_lag_grace_minutes)))
 
         # Persist dedup state across daemon restarts.
         self._load_fp_cache()
@@ -967,7 +985,6 @@ class SignalWriter:
                 so multiple modify events for the same id are each unique.
         FIX-2: identical control events from successive reruns are suppressed.
         """
-        open_lag_grace = timedelta(minutes=10)
         new_lines: List[str] = []
         for ev in events:
             canon_ev = self._canonicalize_event(ev)
@@ -976,13 +993,14 @@ class SignalWriter:
             if canon_ev.get("action") == "open" and self._latest_open_ts is not None:
                 ev_ts = _parse_event_ts(canon_ev)
                 if ev_ts is not None:
-                    threshold = self._latest_open_ts - open_lag_grace
+                    threshold = self._latest_open_ts - self._open_lag_grace
                     if ev_ts < threshold:
                         lag_min = int((self._latest_open_ts - ev_ts).total_seconds() / 60)
                         print(
                             f"[daemon] SKIP_STALE_OPEN id={canon_ev.get('id', '')} "
                             f"entry_ts={canon_ev.get('entry_ts', '')} "
                             f"watermark={self._latest_open_ts.isoformat()} "
+                            f"grace_min={int(self._open_lag_grace.total_seconds() / 60)} "
                             f"lag_min={lag_min}"
                         )
                         continue
@@ -1162,6 +1180,14 @@ def _parse_args() -> argparse.Namespace:
                    help="How often to poll for file changes (seconds)")
     p.add_argument("--heartbeat-interval", type=float, default=300.0,
                    help="Heartbeat interval in seconds (0 = disabled)")
+    p.add_argument("--live-window-minutes", type=float, default=60.0,
+                   help="Open-event rolling window (minutes) used on startup recovery and poll appends")
+    p.add_argument("--live-window-broker-offset-hours", type=float, default=0.0,
+                   help="Additional hours added to rolling window to account for broker clock offset")
+    p.add_argument("--live-window-drop-log-limit", type=int, default=5,
+                   help="Max per-cycle detailed ROLLING_WINDOW_DROP lines")
+    p.add_argument("--open-lag-grace-minutes", type=int, default=10,
+                   help="Grace period used by stale-open watermark dedup")
     # CASH overrides (forwarded to engine)
     p.add_argument("--cash-max-leverage",      type=float, default=200.0)
     p.add_argument("--cash-trail-max-loss-pct",type=float, default=15.0)
@@ -1186,10 +1212,11 @@ def main() -> None:
     print(f"[daemon] capital     : £{args.capital:,.0f}")
     print(f"[daemon] signal file : {args.signal_filename}")
     print(f"[daemon] poll        : {args.poll_seconds}s")
+    print(f"[daemon] live window : {args.live_window_minutes}m (+{args.live_window_broker_offset_hours}h offset)")
     print(f"[daemon] MT5 paths   : {_find_mt5_common_files() or ['(none found)']}")
     print("=" * 60)
 
-    writer = SignalWriter(args.signal_filename, args.output_dir)
+    writer = SignalWriter(args.signal_filename, args.output_dir, args.open_lag_grace_minutes)
     watcher = MtimeWatcher(data_files)
     resume_flag_mtimes = _snapshot_manual_resume_flags(args)
     master_mode = ""
@@ -1219,7 +1246,12 @@ def main() -> None:
 
     if writer.has_existing_signal_stream():
         # Restart recovery should not append historical opens again.
-        events = _filter_events_rolling_window(events, window_hours=1.0)
+        events = _filter_events_rolling_window(
+            events,
+            window_hours=max(0.0, float(args.live_window_minutes)) / 60.0,
+            broker_offset_hours=args.live_window_broker_offset_hours,
+            drop_log_limit=args.live_window_drop_log_limit,
+        )
         appended = writer.append_new(events)
         print(f"[daemon] startup recovery mode: appended {appended} unseen event(s)")
     else:
@@ -1299,7 +1331,12 @@ def main() -> None:
                 print("[daemon] transient CSV read race (empty file), skipping this poll")
                 continue
 
-            events = _filter_events_rolling_window(events, window_hours=1.0)
+            events = _filter_events_rolling_window(
+                events,
+                window_hours=max(0.0, float(args.live_window_minutes)) / 60.0,
+                broker_offset_hours=args.live_window_broker_offset_hours,
+                drop_log_limit=args.live_window_drop_log_limit,
+            )
             watcher.update()
             appended = writer.append_new(events)
             latest_bar = _read_latest_mt5_bar_ts_close(carry_tf_path)
